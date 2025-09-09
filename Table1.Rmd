@@ -26,8 +26,8 @@ From these data, we identified new users of either NSAID or Cox-2 selective non-
 
 It is always important to review new data.  In the $\tt{NAMCS}$ package, the data frame is named $\tt{ns}$. To browse the data, we pipe the data frame $\tt{ns}$ into the $\tt{datatable}$ function, which creates an interactive viewer in the output.
 
-```{r, eval = FALSE}
-ns %>% datatable()
+```{r, eval = TRUE}
+datatable(ns)
 ```
 
 
