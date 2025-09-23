@@ -1,5 +1,5 @@
 ---
-title: "Estimating propensity scores with logistic regression"
+title: "Estimating causal effects with propensity scores"
 output: html_document
 ---
 
