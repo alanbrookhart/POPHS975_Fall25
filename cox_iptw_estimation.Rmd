@@ -1,0 +1,158 @@
+---
+title: "Estimating IPTW survival curves and Cox proportional hazards regression"
+output:
+  html_document: default
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library("devtools")
+devtools::install_github("alanbrookhart/NAMCS")
+library(NAMCS)
+library(tableone)
+library(survey)
+library(DT)
+library(survival)
+library(knitr)
+library(GGally)
+```
+
+## Cohort: new users of statins versus non-users in the National Ambulatory Medical Care Data Survey
+
+We have built a cohort from the 2005-2009 public use files from National Ambulatory Medical Care Data Survey (NAMCS).  The NAMCS survey covers over 20,000 visits per year and includes data on patient demographics, comorbidities, physician and practice characteristics, and treatment received, including medications. Currently, medications are classified using the Multum Lexicon. 
+
+From these data, we identified new users of statins and non-users who are over age 18. The data were augmented with a simulated peptic ulcer disease outcome. Variables were selected for this extract based on relevance to the example analyses and on availability for most or all of the 2005-2009 time range.
+
+## Viewing the data
+
+In the $\tt{NAMCS}$ package, the data frame is named $\tt{sta}$. To browse the data, we pipe the first few rows of data frame $\tt{sta}$ into the $\tt{datatable}$ function, which creates an interactive viewer in the output.
+
+```{r}
+head(sta) %>% datatable()
+```
+
+
+## Create a simple Table 1
+
+To understand the characteristics of each treatment group, we create a table 1 summarizing variables by treatment group.  Variables with an SMD > 0.1 are customarily considered to be out of balance.  The table suggest that the statin initiators have a higher burden of cardiovascular risk factors.
+
+```{r}
+factor_vars = c("year", "region", "arthritis", "asthma", "cancer", "cerebrovascular_disease", "chronic_kidney_disease", "heart_failure", "chronic_pulmonary_disease", "depression", "diabetes", "hyperlipidemia", "hypertension", "coronory_artery_disease", "osteoporosis", "tobacco_use", "obesity", "mi", "anti_hypertensive_use", "h2_antagonist_use", "ppi_use", "aspirin_use", "anti_coagulant_use", "corticosteroid_use", "sex", "race")
+
+table1 = CreateTableOne(data = sta, vars = c("age", factor_vars), factorVars = factor_vars, 
+                        strata = "statin_use", test = FALSE, smd = TRUE) 
+
+print(table1, smd = TRUE, printToggle = FALSE) %>% kable()
+```
+
+
+## Fit a propensity score model and display parameter estimates
+
+A logistic regression can be used to estimate the propensity scores using the $\tt{glm}$ function.  The parameter estimates from the fitted model are generated using the $\tt{summary}$ function.  The estimates are log odds ratios (ORs).  Exponentiating the ORs gives approximate risk ratios (because statin treatment) is rare.  We include in the PS models the variables that we know are predictors of CV outcomes and thus potentially true confounders.
+```{r}
+ps_model = glm(statin_use ~ age + region + asthma + cancer + aspirin_use + arthritis + cerebrovascular_disease + chronic_kidney_disease + heart_failure + tobacco_use + obesity + mi + chronic_pulmonary_disease + depression + diabetes + hypertension + coronory_artery_disease + sex + race, data = sta, family = binomial)
+
+summary(ps_model)
+```
+
+
+## Add the propensity score to a new analytic data set
+
+The $\tt{predict}$ function generates predicted probabilities (the estimated PSs) from the fitted PS model.  These can be added back into the analytic file.  Here we make a new data set that includes the original data and the estimated PSs.
+```{r}
+sta_analy = sta
+sta_analy$ps <- predict(ps_model, type = "response")
+```
+
+
+## Plot the distribution of PS, by treatment group
+
+The PS distribution can be plotted by treatment group to determine whether there is substantial non-overlap in the PS distributions, suggesting problems with positivity.  Here there do not appear to be problems.
+```{r}
+ggplot(data = sta_analy, aes(x = ps, group = statin_use, fill = statin_use)) +
+  geom_histogram(
+    aes(y = ..density..),
+    #color = "white",
+    alpha = 0.5,
+    binwidth = 0.025,
+    position = position_dodge(width = 0.01)) + theme_bw() +
+  guides(colour = FALSE,
+         linetype = FALSE)
+
+```
+
+
+## Compute IPTW 
+
+Now we can add to the data the inverse probability of treatment weights (IPTWs)
+```{r}
+sta_analy$iptw = I(sta[["statin_use"]] == "Statin") / sta_analy$ps +
+  (I(sta[["statin_use"]] == "No Treatment")) / (1 - sta_analy$ps)
+```
+
+
+## Summarize weights by treatment groups
+
+We inspect the distribution of weights within each treatment group to look for unusually small or large weights that reflect  highly influential observations which should be examined to rule out problems with data.
+```{r}
+summary(sta_analy$iptw[sta_analy$statin_use == "Statin"],)
+summary(sta_analy$iptw[sta_analy$statin_use == "No Treatment"],)
+```
+
+
+## Create weighted table 1
+To determine if the IPTWs have appropriately balanced covariates, we can construct a weighted Table 1.  We see that the variables included in the PS model appear to be well balanced.
+```{r}
+sta_svy = svydesign(ids = ~ 1, data = sta_analy,
+                   weights = ~ iptw)
+
+ipw_table1 = svyCreateTableOne(vars = factor_vars, factorVars = factor_vars, 
+                  strata = "statin_use",
+                  data = sta_svy, test = FALSE, smd = TRUE)
+
+print(ipw_table1, smd = TRUE, printToggle = FALSE) %>% kable()
+```
+
+
+## Unadjusted survival curve
+
+Next we explore the association between statin initiation and the composite outcome of death or CV event by computing unadjusted survival curves of the composite event using Kaplan-Meier estimatir.  Here we see that statin initiators have substantially higher risk of experiencing the outcome than non-initiators.
+```{r}
+sta_analy$event_time = ifelse(is.na(sta_analy$cv_death_time), 10,  sta_analy$death_time)
+sta_analy$event_indicator = ifelse(is.na(sta_analy$cv_death_time), 0, 1)
+
+unadjusted <- survival::survfit(Surv(event_time, event_indicator) ~ statin_use, data = sta_analy)
+ggsurv(unadjusted)
+ 
+```
+
+
+## Adjusted survival curve
+
+Next we estimate counterfactual survival (risk) functions by applying IPTW to the Kaplan-Meier estimator. After applying the weights, the groups look much closer with respect to risk; however, statin initiators continue to have a higher risk than non-initiators.
+```{r}
+adjusted <- survival::survfit(Surv(event_time, event_indicator) ~ statin_use, weights = iptw, data = sta_analy)
+ggsurv(adjusted)
+ 
+```
+
+## Unadjusted Cox PH model
+
+Confirming what we observed in the survival curves, in an unweighted Cox regression, statin initiation is associated with a ~20% increased risk of the composite outcome in a Cox 
+```{r}
+
+cox_unadjusted <- survival::coxph(Surv(event_time, event_indicator) ~ statin_use, data = sta_analy)
+summary(cox_unadjusted)
+ 
+```
+
+
+## Adjusted Cox PH model
+
+However, after applying IPTWs to the Cox model, the estimated effect of statin intiation and hazard of the composite event is attenuated.  Note that when using weights, we need to use the "robust" estimator of the SE.
+```{r}
+cox_adjusted <- survival::coxph(Surv(event_time, event_indicator) ~ statin_use, weight = iptw, data = sta_analy)
+summary(cox_adjusted)
+```
+
