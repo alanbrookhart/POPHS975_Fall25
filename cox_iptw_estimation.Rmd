@@ -15,6 +15,7 @@ library(survey)
 library(DT)
 library(survival)
 library(knitr)
+library(broom)
 library(GGally)
 ```
 
@@ -143,7 +144,8 @@ Confirming what we observed in the survival curves, in an unweighted Cox regress
 ```{r}
 
 cox_unadjusted <- survival::coxph(Surv(event_time, event_indicator) ~ statin_use, data = sta_analy)
-summary(cox_unadjusted)
+
+tidy(cox_unadjusted,exponentiate = TRUE, conf.int = TRUE) %>% kable()
  
 ```
 
@@ -152,7 +154,8 @@ summary(cox_unadjusted)
 
 However, after applying IPTWs to the Cox model, the estimated effect of statin intiation and hazard of the composite event is attenuated.  Note that when using weights, we need to use the "robust" estimator of the SE.
 ```{r}
-cox_adjusted <- survival::coxph(Surv(event_time, event_indicator) ~ statin_use, weight = iptw, data = sta_analy)
-summary(cox_adjusted)
+cox_adjusted <- survival::coxph(Surv(event_time, event_indicator) ~ statin_use, weight = iptw, data = sta_analy, cluster = id)
+
+tidy(cox_adjusted,exponentiate = TRUE, conf.int = TRUE) %>% kable()
 ```
 
