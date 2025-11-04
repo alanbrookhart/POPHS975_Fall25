@@ -1,0 +1,204 @@
+---
+title: "Censoring and effect measure modification"
+author: "Alan Brookhart"
+date: "March 22, 2024"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Intro
+
+```{r set-up, include = FALSE}
+library(tidyverse)
+library(rlang)
+library(geepack)
+library(knitr)
+library(broom)
+library(dagitty)
+library(ggdag)
+
+```
+
+Here we develop an R function to do IP weighting to address confounding and informative censoring in an example with an outcome and causal contrast that can be modeled with a generalized linear model.
+
+### Simulation example
+
+We simulates a simple data structure with a dichotomous treatment $A \in (0,1)$,two normally distributed baseline variables, $W_1, W_2$, two normally distributed counterfactual outcomes $Y(1), Y(0)$ (the outcomes we would have observed under the different treatments),  and an indicator variable $S$ of whether the outcome $Y$ is uncensored. The outcome is assumed to satisfy $Y = Y_0 I(A=0) + Y_1 I(A=1)$. Both baseline variables are potentially related to both counterfactual outcomes.  $W_1$ can have a relationship to the censoring mechanism.  $W_2$ can have a relationship to the treatment mechanism. The DAG for this data generating mechanism is given by
+
+
+```{r dag}
+coord_dag <- list(
+  x = c(W2 = 0, W1 = 0, A = 1, S = 2, Y = 3),
+  y = c(W2 = 0, W1 = 4, A = 2, S = 3, Y = 2)
+)
+
+dag <- ggdag::dagify(S ~ W1,
+                     S ~ A,
+                     A ~ W2,
+                     Y ~ A,
+                     Y ~ W1,
+                     Y ~ W2,
+                     coords = coord_dag)
+
+ggdag::ggdag(dag) + theme_void()
+```
+
+
+The treatment effect is fixed at 1, E[Y(1)] - E[Y(0)] = 1. To establish a check on our simulation and to understand how much statistical information is lost through the weighting, we also conduct an RCT of the treatment among the simulated patients, with random (non-informative) censoring. To do this we generate a second, randomly assigned treatment $Arct$ and an associated observed outcome $Yrct = Y_0 I(Arct=0) + Y_1 I(Arct=1)$ that is subject to random censoring that occurs at the same rate as with $Y$. A crude, complete case analyses of these data should provide an unbiased estimate of counterfactual contrasts.
+
+```{r simulation}
+
+sim_func = function(
+                    gamma0.w1 = 2,
+                    gamma0.w2 = 2,
+                    gamma1 = 1,
+                    gamma1.w1 = 2,
+                    gamma1.w2 = 2,
+                    alpha.0 = -1,
+                    alpha.W2 = 1,
+                    delta.0 = 1,
+                    delta.A = 0,
+                    delta.W1 = 1,
+                    n = 50000,
+                    seed = NULL)
+{
+  if (!is.null(seed))
+    set.seed(seed)
+  W1 = rnorm(n)
+  W2 = rnorm(n)
+  Y0 = rnorm(n, mean = gamma0.w1 * W1 + gamma0.w2 * W2)
+  Y1 = rnorm(n, mean = gamma1 + gamma1.w1 * W1 + gamma1.w2 * W2)
+  A = as.integer(ifelse(runif(n) < exp(alpha.0 + alpha.W2 * W2) /
+                          (1 + exp(alpha.0 + alpha.W2 * W2)), 1, 0))
+  S = as.integer(ifelse(runif(n) < exp(delta.0 + delta.W1 * W1 +  delta.A * A) /
+                          (1 + exp(delta.0 + delta.W1 * W1 +  delta.A * A)), 1, 0))
+  Arct = as.integer(ifelse(runif(n) < mean(A), 1, 0))
+  Y = ifelse(S==1, A * Y1 + (1 - A) * Y0, NA) 
+  Yrct = ifelse(runif(n) < mean(S), Arct * Y1 + (1 - Arct) * Y0, NA) 
+  tibble::tibble(
+    pid = seq(1, n), W1, W2, Y0, Y1, Y, A, Arct, Yrct, S)
+}
+```
+
+
+We call this function using the default parameter settings that result in both confounding and informative censoring.  We generate a sample size of 100,000. 
+
+```{r simdata}
+sim_data = sim_func(n = 100000, seed = 101)
+
+head(sim_data) %>% kable(digits = 3)
+```
+
+### Estimation
+
+The general goal of our estimation function is to estimate a causal contrasts that can be modeled with a generalized linear model $m_\beta(a)$, such as model for a difference in counterfacutal outcomes $m_\beta(a) = \beta_0 + \beta_1 a$ where $\beta_1 = E[Y(1)]- E[Y(0)]$. Or a ratio of counterfacutal outcomes $m_\beta(a) = exp(\beta_0 + \beta_1 a)$ where $\exp(\beta_1) = E[Y(1)] / E[Y(0)]$.
+
+These can be estimated using standard generalized linear model estimating equations, weighted to account for censored data and confounding.
+
+Missing data weighting is essentially a complete case analysis that re-weights individuals with observed data so that they resemble the full population.  The weight equals $1/P(S=1|A, W)$, where $P(S=1|A, W)$ is estimated with logistic regression.
+
+Inverse probability treatment weights re-weight each individual so that each treatment group appears to be a random sample from the source population with respect to the confounders. The weight equals the inverse of the probability that a patient receives the treatment that they actually received $IPTW = I(A=1)/P(A=1|W) + I(A=0)/P(A=0|W)$, where $P(A = a|W)$ is estimated with logistic regression.
+
+The re-weighted GLM estimating equations that can be used to estimate $\beta$ have the form:
+
+$$
+0 = \sum_{i = 1}^{N} \frac{ h(W_i, A_i) (Y_i - m_\beta(A_i)) I(S_i=1) }{(I(A_i=1)P(A_i = 1|W_i) + I(A_i=0)P(A_i=0|W_i))P(S_i = 1|A_i, W_i)}
+$$
+
+To get correct inference that accounts for weighting, robust variance estimation is required.  This can be obtained using generalized estimating equations approaches (as implemented in the R package geepack).
+
+We implement this estimator in the function below. It takes as arguments: data, formulae for the treatment and censored data models (both assumed to be logistic regressions), the treatment, outcome, and uncensored data indicators, and a subject identifier variable.  Finally, the user can specify the form of generalized linear model via the family and link parameters.
+
+```{r estimation}
+ipw_estimator = function(data, 
+                         treat_model,
+                         missing_model, 
+                         treat, 
+                         missing,
+                         outcome,
+                         id,
+                         family = gaussian, 
+                         link = "identity")
+{
+  treat_out = glm(treat_model, data = data, family  = binomial)
+  missing_out = glm(missing_model, data = data, family  = binomial)
+  aug_data = data %>% transmute(
+    id = {{id}},
+    A = {{treat}},
+    Y = {{outcome}},
+    S = {{missing}},
+    ps = predict(treat_out, type = "response"),
+    iptw = {{treat}} / ps + (1 - {{treat}}) / (1 - ps),
+    missing_prob = predict(missing_out, type = "response"),
+    missing_wt = {{missing}}/missing_prob,
+    weight = missing_wt * iptw
+    )
+  geeglm(Y~A, data = aug_data, weights = weight,
+         family  = family(link = link), id = id)
+}
+```
+
+# Unadjusted estimator (E0)
+
+```{r unadj}
+unadj_results = 
+  ipw_estimator(sim_data, A ~ 1, S ~ 1, A, S, Y, id = pid, 
+                family  = gaussian,link = "identity") 
+tidy(unadj_results, conf.int = TRUE) %>% kable(digits = 3)
+```
+
+# Estimator with a correct censoring model (E1)
+
+```{r part_adj1}
+part_adj1_results = 
+  ipw_estimator(sim_data, A ~ 1, S ~ W1 + A, A, S, Y, id = pid, 
+                family  = gaussian,link = "identity") 
+tidy(part_adj1_results, conf.int = TRUE) %>% kable(digits = 3)
+```
+
+# Estimator with a correct treatment model (E2)
+
+```{r part_adj2}
+part_adj2_results = 
+  ipw_estimator(sim_data, A ~ W2, S ~ 1, A, S, Y, id = pid, 
+                family  = gaussian,link = "identity") 
+tidy(part_adj2_results, conf.int = TRUE) %>% kable(digits = 3)
+```
+
+# Estimator with a correct treatment and censoring model (E3)
+
+```{r adj}
+adj_results = ipw_estimator(sim_data, A ~ W2, S ~ W1 +A, A, S, Y, id = pid,
+                            family  = gaussian, link = "identity") 
+tidy(adj_results, conf.int = TRUE) %>% kable(digits = 3)
+```
+
+
+# Reference estimator (E4)
+
+This provides an estimator of the treatment effect in the sample using the randomized treatment and censoring variables.  Note this estimator would not available in practice.
+
+```{r bench}
+benchmark_estimate = function(data, model, family = gaussian, link = "identity")
+{
+  glm(model, data = data, family  = family(link = link))
+}
+
+tidy(benchmark_estimate(sim_data, Yrct ~ Arct), conf.int = TRUE) %>% 
+  kable(digits = 3)
+```
+
+
+# Questions
+
+1) Do any of the estimators appear to be unbiased?
+
+2) We see that E3 and E4 are similar but the confidence interval (CI) for E4 is considerably more narrow than the CI for E3. Can you explain this?
+
+3) (Optional) Load the Rmarkdown file in R-Studio and modify the simulation to remove the effect of treatment on censoring. Do you expect the estimator E2 to be unbiased now? Run the program and describe and try to explain what you observe.
+
+4) (Optional) Describe how treatment effect heterogeneity is induced in the simulated data.  Now attempt to remove treatment effect heterogeneity by W1 by changing the parameters in the call to sim_func. Run the program and describe and try to explain what you observe.
+
