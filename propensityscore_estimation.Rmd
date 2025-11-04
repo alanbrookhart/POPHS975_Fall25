@@ -136,7 +136,7 @@ print(ipw_table1, smd = TRUE)
 
 We can now estimate the causal effect of treatment on the outcome risk by doing a weighted regression.
 ```{r}
-glm_weighted = glm(incident_pud ~ cox2_initiation, data = ns_analy, family = binomial,
+glm_weighted = glm(incident_pud ~ cox2_initiation, data = ns_analy, family = binomial(link = "logit"),
                      weights = iptw)
 summary(glm_weighted)
 ```
