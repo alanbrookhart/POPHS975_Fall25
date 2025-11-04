@@ -154,7 +154,27 @@ tidy(cox_unadjusted,exponentiate = TRUE, conf.int = TRUE) %>% kable()
 
 However, after applying IPTWs to the Cox model, the estimated effect of statin intiation and hazard of the composite event is attenuated.  Note that when using weights, we need to use the "robust" estimator of the SE.
 ```{r}
-cox_adjusted <- survival::coxph(Surv(event_time, event_indicator) ~ statin_use, weight = iptw, data = sta_analy, cluster = id)
+cox_adjusted <- survival::coxph(Surv(event_time, event_indicator) ~ statin_use, weight = iptw, data = sta_analy)
+
+tidy(cox_adjusted,exponentiate = TRUE, conf.int = TRUE) %>% kable()
+```
+
+
+## Adjusted Cox PH model
+
+However, after applying IPTWs to the Cox model, the estimated effect of statin intiation and hazard of the composite event is attenuated.  Note that when using weights, we need to use the "robust" estimator of the SE.
+```{r}
+cox_adjusted <- survival::coxph(Surv(event_time, event_indicator) ~ statin_use, weight = iptw, data = sta_analy)
+
+tidy(cox_adjusted,exponentiate = TRUE, conf.int = TRUE) %>% kable()
+```
+
+
+## Multivariable adjusted Cox PH model
+
+However, after applying IPTWs to the Cox model, the estimated effect of statin intiation and hazard of the composite event is attenuated.  Note that when using weights, we need to use the "robust" estimator of the SE.
+```{r}
+cox_adjusted <- survival::coxph(Surv(event_time, event_indicator) ~ statin_use + age + region + asthma + cancer + aspirin_use + arthritis + cerebrovascular_disease + chronic_kidney_disease + heart_failure + tobacco_use + obesity + mi + chronic_pulmonary_disease + depression + diabetes + hypertension + coronory_artery_disease + sex + race, data = sta_analy)
 
 tidy(cox_adjusted,exponentiate = TRUE, conf.int = TRUE) %>% kable()
 ```
